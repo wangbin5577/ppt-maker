@@ -1,0 +1,11 @@
+# 输出文件
+output/*.pptx
+
+# 临时文件
+~$*.pptx
+*.tmp
+__pycache__/
+*.pyc
+
+# archive目录（旧文件不上传）
+archive/
