@@ -9,3 +9,6 @@ __pycache__/
 
 # archive目录（旧文件不上传）
 archive/
+
+# examples目录（本地提示词示例不上传）
+examples/
