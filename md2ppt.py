@@ -39,6 +39,7 @@ class SlideData:
         self.table_rows = []
         self.notes = []
         self.code_blocks = []    # [str, ...] 代码块列表
+        self.image_placeholders = []  # [str, ...] 图片占位说明列表
 
 
 class MarkdownParser:
@@ -239,8 +240,16 @@ class MarkdownParser:
                 slide.notes.append(text)
                 continue
 
-            # 跳过配图/背景图/布局等描述
-            if re.match(r'^(配图|背景图|布局|时间轴)[：:]', stripped):
+            # 跳过配图/背景图/布局等描述（改为提取为图片占位符）
+            if re.match(r'^(配图|背景图)[：:]', stripped):
+                caption = re.split(r'[：:]', stripped, 1)[-1].strip()
+                if caption:
+                    slide.image_placeholders.append(caption)
+                current_section = None
+                continue
+
+            # 跳过布局/时间轴等纯描述
+            if re.match(r'^(布局|时间轴)[：:]', stripped):
                 current_section = None
                 continue
 
@@ -377,6 +386,13 @@ class MarkdownParser:
             # subtitle: 或 Subtitle: 字段
             if stripped.lower().startswith('subtitle:'):
                 slide.subtitle = stripped[9:].strip().replace('\\n', '\n')
+                current_section = None
+                continue
+
+            # image: 图片占位符
+            if stripped.lower().startswith('image:'):
+                caption = stripped[6:].strip()
+                slide.image_placeholders.append(caption)
                 current_section = None
                 continue
 
@@ -528,15 +544,25 @@ class PPTGenerator:
                     layouts["section"] = i
 
         # 按名称优先匹配（覆盖上面的通用检测）
+        # cover 优先级：Marine GTC > New Cover > 其他 Marine 布局
+        cover_priority = ["marine gtc", "new cover", "marine waves", "marine safety",
+                          "marine engine room", "marine newbuilding", "marine propeller",
+                          "marine compass", "marine turbine"]
+        for priority_name in cover_priority:
+            for i, layout in enumerate(self.prs.slide_layouts):
+                if priority_name in layout.name.lower():
+                    layouts["cover"] = i
+                    break
+            if "cover" in layouts:
+                break
+
         for i, layout in enumerate(self.prs.slide_layouts):
             name = layout.name.lower()
-            if "gtc" in name or "new cover" in name:
-                layouts["cover"] = i
-            elif "spacious" in name and "content_spacious" not in layouts:
+            if "spacious" in name and "content_spacious" not in layouts:
                 layouts["content_spacious"] = i
-            elif "comparison" in name:
+            elif "comparison" in name and "comparison" not in layouts:
                 layouts["comparison"] = i
-            elif "section" in name:
+            elif "section" in name and "section" not in layouts:
                 layouts["section"] = i
 
         # 填充缺失的
@@ -581,11 +607,12 @@ class PPTGenerator:
                 self._add_content(sd, spacious=False)
 
     def _add_title_background(self, slide):
-        """为缺少标题背景的布局添加深蓝色标题栏和蓝色横线"""
-        from pptx.util import Inches, Emu
+        """为缺少标题背景的布局添加深蓝色标题栏和蓝色横线，并把标题文字设为白色"""
         from pptx.dml.color import RGBColor
         from pptx.enum.shapes import MSO_SHAPE
-        
+        from pptx.oxml.ns import qn
+        from lxml import etree
+
         # 深蓝色标题背景 (accent2 = #003C71)
         bg_shape = slide.shapes.add_shape(
             MSO_SHAPE.RECTANGLE,
@@ -595,10 +622,9 @@ class PPTGenerator:
         bg_shape.fill.solid()
         bg_shape.fill.fore_color.rgb = RGBColor(0x00, 0x3C, 0x71)
         bg_shape.line.fill.background()
-        # 移到最底层
         slide.shapes._spTree.remove(bg_shape._element)
         slide.shapes._spTree.insert(2, bg_shape._element)
-        
+
         # 蓝色横线 (accent1 = #3B8EDE)
         line_shape = slide.shapes.add_shape(
             MSO_SHAPE.RECTANGLE,
@@ -610,6 +636,33 @@ class PPTGenerator:
         line_shape.line.fill.background()
         slide.shapes._spTree.remove(line_shape._element)
         slide.shapes._spTree.insert(3, line_shape._element)
+
+    def _set_title_white(self, slide):
+        """把标题占位符的文字颜色设为白色（在设置文字之后调用）"""
+        from pptx.dml.color import RGBColor
+        from pptx.oxml.ns import qn
+        from lxml import etree
+        WHITE = RGBColor(0xFF, 0xFF, 0xFF)
+        for ph in slide.placeholders:
+            if ph.placeholder_format.idx == 0:
+                tf = ph.text_frame
+                for para in tf.paragraphs:
+                    para.font.color.rgb = WHITE
+                    for run in para.runs:
+                        run.font.color.rgb = WHITE
+                    # 直接操作 XML 的 a:r/a:rPr，确保颜色写入
+                    for r in para._p.findall(qn('a:r')):
+                        rPr = r.find(qn('a:rPr'))
+                        if rPr is None:
+                            rPr = etree.SubElement(r, qn('a:rPr'))
+                            r.insert(0, rPr)
+                        # 移除旧的颜色设置
+                        for old in rPr.findall(qn('a:solidFill')):
+                            rPr.remove(old)
+                        solidFill = etree.SubElement(rPr, qn('a:solidFill'))
+                        srgbClr = etree.SubElement(solidFill, qn('a:srgbClr'))
+                        srgbClr.set('val', 'FFFFFF')
+                break
 
     def _add_cover(self, sd):
         layout = self.prs.slide_layouts[self.LAYOUTS["cover"]]
@@ -639,22 +692,28 @@ class PPTGenerator:
             return Pt(14), Pt(13), Pt(3), Pt(1)
 
     def _add_content(self, sd, spacious=False):
-        # 有代码块时强制用大内容区
-        if sd.code_blocks:
-            spacious = True
+        has_images = bool(sd.image_placeholders)
+        has_code = bool(sd.code_blocks)
+
+        # 有图片时用左右分栏布局
+        if has_images and not has_code:
+            self._add_content_with_images(sd)
+            return
+
+        # 有代码块时用左文右代码分栏布局
+        if has_code:
+            self._add_content_with_code(sd)
+            return
+
         layout_idx = self.LAYOUTS["content_spacious"] if spacious else self.LAYOUTS["content"]
         layout = self.prs.slide_layouts[layout_idx]
         slide = self.prs.slides.add_slide(layout)
         slide.placeholders[0].text = sd.title
 
-        # 自动计算字体大小
-        size_l0, size_l1, space_after, space_before = self._calc_font_size(
-            sd.bullets, has_code=bool(sd.code_blocks)
-        )
+        size_l0, size_l1, space_after, space_before = self._calc_font_size(sd.bullets)
 
         tf = slide.placeholders[1].text_frame
         tf.clear()
-
         first_para = True
         for text, level in sd.bullets:
             if first_para:
@@ -668,10 +727,201 @@ class PPTGenerator:
             p.space_after = space_after
             p.space_before = space_before
 
-        # 代码块用独立文本框，位置基于bullet数量估算
-        if sd.code_blocks:
-            self._add_code_blocks(slide, sd.code_blocks, n_bullets=len(sd.bullets),
-                                  font_size=size_l0)
+    def _add_content_with_code(self, sd):
+        """有代码块时使用左文右代码的分栏布局"""
+        layout = self.prs.slide_layouts[self.LAYOUTS.get("title_only", self.LAYOUTS["content"])]
+        slide = self.prs.slides.add_slide(layout)
+        slide.placeholders[0].text = sd.title
+
+        # 添加标题背景（Title Only 布局没有深蓝色标题栏）
+        self._add_title_background(slide)
+        self._set_title_white(slide)
+
+        # 删除所有内容占位符（避免显示 "Click to add text"）
+        for ph in list(slide.placeholders):
+            if ph.placeholder_format.idx != 0:
+                ph._element.getparent().remove(ph._element)
+
+        from pptx.dml.color import RGBColor
+
+        content_top = Inches(1.65)
+        content_bottom = Inches(6.6)
+        content_height = content_bottom - content_top
+        left_margin = Inches(0.5)
+        gap = Inches(0.3)
+        total_width = Inches(11.2)
+
+        n_bullets = len(sd.bullets)
+        n_codes = len(sd.code_blocks)
+
+        if n_bullets == 0:
+            # 纯代码：占满整个内容区
+            text_width = Inches(0)
+            code_width = total_width
+            code_left = left_margin
+        else:
+            # 左文右代码：文字40%，代码55%
+            text_width = total_width * 0.40
+            code_width = total_width * 0.55
+            code_left = left_margin + text_width + gap
+
+        # 左侧文字区
+        if n_bullets > 0:
+            size_l0, size_l1, space_after, space_before = self._calc_font_size(sd.bullets)
+            txBox = slide.shapes.add_textbox(left_margin, content_top, text_width, content_height)
+            tf = txBox.text_frame
+            tf.word_wrap = True
+            tf.margin_top = Pt(4)
+            tf.margin_left = Pt(4)
+            for i, (text, level) in enumerate(sd.bullets):
+                p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
+                p.text = ("  " * level + "• " if level > 0 else "• ") + text
+                p.font.size = size_l0 if level == 0 else size_l1
+                p.font.color.rgb = RGBColor(0x1A, 0x6B, 0xB5)  # 模板正文蓝色
+                p.space_after = space_after
+                p.space_before = space_before
+
+        # 右侧代码区：垂直均分
+        if n_codes > 0:
+            code_gap = Inches(0.15)
+            single_height = (content_height - code_gap * (n_codes - 1)) / n_codes
+            top = content_top
+            for code in sd.code_blocks:
+                lines = code.split('\n')
+                n_lines = len(lines)
+                height = min(single_height, Inches(n_lines * 0.22 + 0.3))
+                height = max(height, Inches(0.8))
+
+                txBox = slide.shapes.add_textbox(code_left, top, code_width, height)
+                tf = txBox.text_frame
+                tf.word_wrap = True
+                tf.margin_top = Pt(6)
+                tf.margin_bottom = Pt(6)
+                tf.margin_left = Pt(8)
+
+                txBox.fill.solid()
+                txBox.fill.fore_color.rgb = RGBColor(0xF5, 0xF5, 0xF5)
+                txBox.line.color.rgb = RGBColor(0xBB, 0xBB, 0xBB)
+                txBox.line.width = Pt(0.75)
+
+                code_size = Pt(11) if n_lines <= 8 else Pt(10) if n_lines <= 14 else Pt(9)
+
+                for i, code_line in enumerate(lines):
+                    p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
+                    p.text = code_line
+                    p.font.name = 'Consolas'
+                    p.font.size = code_size
+                    p.font.color.rgb = RGBColor(0x2D, 0x2D, 0x2D)
+                    p.space_after = Pt(1)
+                    p.space_before = Pt(0)
+
+                top += height + code_gap
+
+    def _add_content_with_images(self, sd):
+        """有图片时使用左文右图的分栏布局"""
+        layout = self.prs.slide_layouts[self.LAYOUTS.get("title_only", self.LAYOUTS["content"])]
+        slide = self.prs.slides.add_slide(layout)
+        slide.placeholders[0].text = sd.title
+
+        # 添加标题背景（Title Only 布局没有深蓝色标题栏）
+        self._add_title_background(slide)
+        self._set_title_white(slide)
+
+        # 删除所有内容占位符
+        for ph in list(slide.placeholders):
+            if ph.placeholder_format.idx != 0:
+                ph._element.getparent().remove(ph._element)
+
+        n_images = len(sd.image_placeholders)
+        n_bullets = len(sd.bullets)
+
+        # 内容区范围
+        content_top = Inches(1.6)
+        content_bottom = Inches(6.6)
+        content_height = content_bottom - content_top
+        left_margin = Inches(0.5)
+        right_margin = Inches(0.3)
+        gap = Inches(0.3)
+        total_width = Inches(11.2)
+
+        if n_bullets == 0:
+            # 纯图片页：图片占满内容区
+            text_width = Inches(0)
+            img_width = total_width
+            text_left = left_margin
+            img_left = left_margin
+        else:
+            # 左文右图：文字占40%，图片占55%
+            text_width = total_width * 0.42
+            img_width = total_width * 0.53
+            text_left = left_margin
+            img_left = left_margin + text_width + gap
+
+        # 左侧文字区
+        if n_bullets > 0:
+            from pptx.dml.color import RGBColor
+            txBox = slide.shapes.add_textbox(text_left, content_top, text_width, content_height)
+            tf = txBox.text_frame
+            tf.word_wrap = True
+            tf.margin_top = Pt(4)
+            tf.margin_left = Pt(4)
+
+            size_l0, size_l1, space_after, space_before = self._calc_font_size(sd.bullets)
+
+            for i, (text, level) in enumerate(sd.bullets):
+                p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
+                p.text = ("  " * level + "• " if level > 0 else "• ") + text
+                p.font.size = size_l0 if level == 0 else size_l1
+                p.font.color.rgb = RGBColor(0x1A, 0x6B, 0xB5)  # 模板正文蓝色
+                p.space_after = space_after
+                p.space_before = space_before
+
+        # 右侧图片区：垂直均分
+        if n_images > 0:
+            img_gap = Inches(0.15)
+            single_height = (content_height - img_gap * (n_images - 1)) / n_images
+            for i, caption in enumerate(sd.image_placeholders):
+                img_top = content_top + i * (single_height + img_gap)
+                self._draw_image_placeholder(slide, img_left, img_top, img_width, single_height, caption)
+
+    def _add_code_blocks_at(self, slide, code_blocks, top):
+        """在指定位置添加代码块文本框（带浅灰背景+边框）"""
+        from pptx.dml.color import RGBColor
+        page_bottom = Inches(6.6)
+
+        for code in code_blocks:
+            lines = code.split('\n')
+            n_lines = len(lines)
+            height = Inches(n_lines * 0.2 + 0.25)
+            available = page_bottom - top
+            if available < Inches(0.5):
+                break
+            height = min(height, available)
+
+            txBox = slide.shapes.add_textbox(Inches(0.8), top, Inches(10.4), height)
+            tf = txBox.text_frame
+            tf.word_wrap = True
+            tf.margin_top = Pt(5)
+            tf.margin_bottom = Pt(5)
+            tf.margin_left = Pt(8)
+
+            txBox.fill.solid()
+            txBox.fill.fore_color.rgb = RGBColor(0xF5, 0xF5, 0xF5)
+            txBox.line.color.rgb = RGBColor(0xBB, 0xBB, 0xBB)
+            txBox.line.width = Pt(0.75)
+
+            code_size = Pt(11) if n_lines <= 8 else Pt(10) if n_lines <= 14 else Pt(9)
+
+            for i, code_line in enumerate(lines):
+                p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
+                p.text = code_line
+                p.font.name = 'Consolas'
+                p.font.size = code_size
+                p.font.color.rgb = RGBColor(0x2D, 0x2D, 0x2D)
+                p.space_after = Pt(1)
+                p.space_before = Pt(0)
+
+            top += height + Inches(0.15)
 
     def _add_code_blocks(self, slide, code_blocks, n_bullets=0, font_size=Pt(18)):
         """在幻灯片上添加代码块文本框（带浅灰背景+边框）"""
@@ -743,6 +993,83 @@ class PPTGenerator:
 
             top += height + Inches(0.15)
 
+    def _add_image_placeholders(self, slide, captions, n_bullets=0, has_code=False):
+        """添加图片占位框（虚线边框 + 浅蓝背景 + 说明文字）"""
+        from pptx.dml.color import RGBColor
+        from pptx.oxml.ns import qn
+        from lxml import etree
+
+        # 计算起始位置：在正文和代码块之后
+        base_top = 1.7 + n_bullets * 0.35
+        if has_code:
+            base_top += 2.5  # 代码块大约占2.5英寸
+        base_top = max(base_top, 2.5)
+        base_top = min(base_top, 4.8)
+
+        page_bottom = Inches(6.6)
+        n = len(captions)
+
+        if n == 1:
+            # 单图：居中，宽8英寸
+            top = Inches(base_top)
+            available = page_bottom - top
+            height = min(Inches(2.5), available)
+            if height < Inches(0.6):
+                return
+            self._draw_image_placeholder(slide, Inches(1.5), top, Inches(9.0), height, captions[0])
+        else:
+            # 多图：并排，每个等宽
+            top = Inches(base_top)
+            available = page_bottom - top
+            height = min(Inches(2.2), available)
+            if height < Inches(0.6):
+                return
+            total_width = Inches(10.4)
+            gap = Inches(0.2)
+            w = (total_width - gap * (n - 1)) / n
+            for i, caption in enumerate(captions):
+                left = Inches(0.8) + i * (w + gap)
+                self._draw_image_placeholder(slide, left, top, w, height, caption)
+
+    def _draw_image_placeholder(self, slide, left, top, width, height, caption):
+        """绘制单个图片占位框"""
+        from pptx.dml.color import RGBColor
+        from pptx.enum.shapes import MSO_SHAPE
+        from pptx.oxml.ns import qn
+        from lxml import etree
+
+        # 浅蓝背景矩形
+        box = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, left, top, width, height)
+        box.fill.solid()
+        box.fill.fore_color.rgb = RGBColor(0xE8, 0xF4, 0xFF)
+        # 虚线边框
+        box.line.color.rgb = RGBColor(0x3B, 0x8E, 0xDE)
+        box.line.width = Pt(1.0)
+        # 设置虚线样式（通过XML）
+        ln = box._element.find('.//' + qn('a:ln'))
+        if ln is not None:
+            prstDash = etree.SubElement(ln, qn('a:prstDash'))
+            prstDash.set('val', 'dash')
+
+        # 文字：图标 + 说明
+        tf = box.text_frame
+        tf.word_wrap = True
+        tf.margin_top = Pt(8)
+        tf.margin_left = Pt(8)
+
+        p1 = tf.paragraphs[0]
+        p1.text = "🖼"
+        p1.font.size = Pt(20)
+        from pptx.enum.text import PP_ALIGN
+        p1.alignment = PP_ALIGN.CENTER
+
+        p2 = tf.add_paragraph()
+        p2.text = caption if caption else "[ 图片 ]"
+        p2.font.size = Pt(11)
+        p2.font.color.rgb = RGBColor(0x1a, 0x6b, 0xb5)
+        p2.font.italic = True
+        p2.alignment = PP_ALIGN.CENTER
+
     def _add_comparison(self, sd):
         layout = self.prs.slide_layouts[self.LAYOUTS["comparison"]]
         slide = self.prs.slides.add_slide(layout)
@@ -751,6 +1078,7 @@ class PPTGenerator:
         self._add_title_background(slide)
         
         slide.placeholders[0].text = sd.title
+        self._set_title_white(slide)
         slide.placeholders[1].text = sd.left_title
         slide.placeholders[3].text = sd.right_title
 
@@ -774,6 +1102,19 @@ class PPTGenerator:
         layout = self.prs.slide_layouts[self.LAYOUTS["table"]]
         slide = self.prs.slides.add_slide(layout)
         slide.placeholders[0].text = sd.title
+
+        # 如果布局缺少深蓝色标题背景，手动添加
+        layout_name = layout.name.lower()
+        if "spacious" in layout_name or "spacous" in layout_name:
+            self._add_title_background(slide)
+            self._set_title_white(slide)
+
+        # 删除内容占位符（idx=1），避免显示 "Click to add text"
+        for ph in slide.placeholders:
+            if ph.placeholder_format.idx == 1:
+                sp = ph._element
+                sp.getparent().remove(sp)
+                break
 
         if sd.table_headers and sd.table_rows:
             n_cols = len(sd.table_headers)

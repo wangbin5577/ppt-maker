@@ -60,7 +60,7 @@ python md2ppt.py 提示词.md output/演示.pptx --template 其他模板.pptx
 Web UI 方式：
 
 ```bash
-streamlit run app.py
+streamlit run app.py --server.port 8503
 ```
 
 或双击 `启动Web UI.bat`，打开浏览器上传模板和提示词即可。

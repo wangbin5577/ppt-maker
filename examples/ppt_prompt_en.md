@@ -4,7 +4,6 @@
 - Topic: How a marine engineer used Microsoft Copilot + VS Code to complete shaft alignment research and software development
 - Audience: Ship designers (colleagues — familiar with engineering questions, not interested in TMM algorithm internals)
 - Style: Professional engineering presentation, visual-rich, navy blue + white color scheme
-- Pages: 20 slides
 - Language: English
 
 ## Slide 1 [cover]
@@ -14,6 +13,37 @@ subtitle: From Theory Research to Prototype Development\nShaft Alignment Departm
 
 ## Slide 2 [content]
 
+title: What Is Shaft Alignment?
+
+- Ship propulsion shafting consists of multiple shaft sections and bearings, spanning tens of meters
+- Shaft alignment = determining optimal bearing height positions to ensure:
+  - Bearing reactions within allowable limits (no overload, no lift-off)
+  - Uniform contact pressure, avoiding localized wear
+  - Crankshaft deflection within engine manufacturer limits
+- Engineering purpose
+  - Installation: guide bearing seat boring and shim adjustment
+  - Operation: predict thermal deformation, assess wear impact on reactions
+- Subject to classification society rule approval (LR Rules Pt5 Ch8 §5.4.2)
+
+## Slide 3 [content]
+
+title: Typical Calculation Methods for Shaft Alignment
+
+- Three-Moment Equation Method
+  - Classical continuous beam method based on moment continuity across three spans
+  - Suitable for uniform cross-sections, simple supports; hand-calculable
+  - Limitation: difficult for variable sections, concentrated masses, elastic supports
+- Transfer Matrix Method (TMM)
+  - State vector [y, θ, M, V] propagated segment by segment via 4×4 matrix multiplication
+  - Handles variable sections, concentrated masses, elastic supports, Timoshenko shear
+  - Core method adopted in this project
+- Finite Element Method (FEM / FEA)
+  - Most general: arbitrary BEAM / SHELL / SOLID element combinations
+  - Can perform contact analysis, nonlinear, thermo-structural coupling
+  - Used in this project as ANSYS APDL for verification and extension
+
+## Slide 4 [content]
+
 title: About Me — A Ship Designer, Not a Programmer
 
 - Day job: ship propulsion shaft alignment calculation, LR rule compliance review
@@ -22,12 +52,12 @@ title: About Me — A Ship Designer, Not a Programmer
 - Motivation: deep curiosity about shaft alignment + eagerness to explore AI tools
 - Outcome preview: built a tool matching LR official accuracy and exceeding its functional scope
 
-## Slide 3 [content]
+## Slide 5 [content]
 
 title: Why This Project — Limitations of Existing Tools
 
 - LR official software limitations
-  - Outputs only **concentrated bearing reactions** — no internal pressure distribution
+  - Outputs only concentrated bearing reactions — no internal pressure distribution
   - No reliable verification method for slope-bored stern tube bearings
   - Black-box calculation: when something goes wrong, hard to locate
 - Project goals
@@ -35,7 +65,7 @@ title: Why This Project — Limitations of Existing Tools
   - Extend capability: bearing contact pressure distribution + slope-bored bearings
   - Transparent and auditable: better third-party calculation review
 
-## Slide 4 [comparison]
+## Slide 6 [comparison]
 
 title: My AI Toolchain
 
@@ -52,61 +82,44 @@ right:
 - Debugging and refactoring: breakpoints, exception traces
 - Version control: Git integration, full iteration history
 
-## Slide 5 [content]
+## Slide 7 [content]
 
 title: Real Research Path — 3 Phases (ANSYS Was the Key Debugging Tool)
 
 - Phase 1: Rigid-support TMM + ANSYS reverse debugging
   - Wrote TMM in Python, found large error vs LR; LR is a black box, can't see intermediates
-  - **Switched to ANSYS APDL** — detailed log let me reverse-locate TMM bugs
+  - Switched to ANSYS APDL — detailed log let me reverse-locate TMM bugs
   - Outcome: TMM matches LR perfectly (RMS < 1 kgf)
 - Phase 2: Elastic supports + Influence Coefficient Matrix
   - Continued the ANSYS-validation pattern
   - Outcome: elastic RMS = 0.64 kgf
 - Phase 3: Extended ANSYS contact analysis (beyond LR)
   - Straight bearing: pressure distribution + contact arc
-  - Slope-bored bearing: LR software cannot compute this; this project can
+  - Slope-bored bearing: two-step method for analysis LR software cannot perform
 
-→ ANSYS is not "third-party validation" — it is the **primary debugging tool**, without which TMM could not have been calibrated
+→ ANSYS is not "third-party validation" — it is the primary debugging tool, without which TMM could not have been calibrated
 
-## Slide 6 [section]
+## Slide 8 [section]
 
 title: Phase 1
-subtitle: AI-Assisted Literature Review
+subtitle: AI-Assisted Literature Review + TMM Development
 
-## Slide 7 [content]
+## Slide 9 [content]
 
-title: Phase 1 — AI-Assisted Literature Review (2 core papers)
+title: AI-Assisted Literature Review (2 Core Papers)
 
-- ★ Vulić N., Šestan A., Cvitanić V. *Modelling of Propulsion Shaft Line and Basic Procedure of Shafting Alignment Calculation*. Brodogradnja, 2008, 59(3): 223–227.
+- ★ Vulić N., Šestan A., Cvitanić V. *Modelling of Propulsion Shaft Line*. Brodogradnja, 2008.
   - §2.4 derives the 4×4 transfer matrix; §2.5 gives the influence coefficient matrix H = A⁻¹
   - Direct formula source for our TMM algorithm
-- Kozousek W. M., Davies P. G. *Analysis and Survey Procedures of Propulsion Systems: Shafting Alignment*. Lloyd's Register Technical Association, Paper No.5, London, 2000.
+- Kozousek W. M., Davies P. G. *Analysis and Survey Procedures of Propulsion Systems*. LR Paper No.5, 2000.
   - LR practitioner's overview (loads, bearings, installation, measurement)
   - Provides engineering context and terminology — no numerical formulas
 
-Working method: used Microsoft Copilot to dissect Vulić's formulas paragraph-by-paragraph and cross-reference Kozousek's engineering context. **Two papers, deeply read** — AI makes depth-over-breadth practical without paper-stacking.
-
-## Slide 8 [content]
-
-title: Phase 1 — AI Helped Pinpoint the Core Method from 2 Papers
-
-- Finding 1: full TMM derivation in Vulić et al. (2008) §2.4 — state vector [w, β, M, Q] + 4×4 transfer matrix + 4×1 load vector
-- Finding 2: influence coefficient matrix (ICM) from the same paper §2.5 — equation R = R₀ + H·(p − p₀) maps directly to my code's `R = R0 + A·δ`
-- Finding 3: LR Paper No.5 provides engineering context (loads, bearings, installation) — no numerical formulas, which prevented "looking for formulas in the wrong place"
-- Finding 4: shear correction κ — Vulić recommends κ ∈ [1.11, 1.45], but a ~54 kgf gap remained vs LR official software
-  - Engineer + AI calibration: locked κ = 1.0 by back-calibration to bring RMS below 1 kgf
-  - Engineering insight neither paper nor rules state explicitly
-- Verification: had Copilot explain every matrix element in Vulić §2.4 eq.(3) against the original notation, element-by-element
-
-## Slide 9 [section]
-
-title: Phase 1
-subtitle: Rigid-Support TMM + ANSYS Reverse Debugging
+Working method: used Microsoft Copilot to dissect Vulić's formulas paragraph-by-paragraph and cross-reference Kozousek's engineering context. Two papers, deeply read — AI makes depth-over-breadth practical.
 
 ## Slide 10 [content]
 
-title: Phase 1 — TMM Solver (Core Code)
+title: TMM Solver Core Code
 
 - Input: Excel shaft data (64 beam segments + 10 bearings + 10 concentrated masses)
 - Algorithm: Timoshenko 4×4 transfer matrix propagating state vector [y, θ, M, V]
@@ -120,7 +133,6 @@ def build_transfer_matrix(E, L, D_out, D_in, density, start_x):
     EI = E * I                                          # N*mm^2
     A  = math.pi /  4.0 * (D_out**2 - D_in**2)        # mm^2
     kGA = _shear_kGA(D_out, D_in, E)                    # N
-    w  = density * 1e-6 * A * G                         # N/mm
 
     T = np.array([
         [1, L, L**2/(2*EI), L**3/(6*EI) - L/kGA],   # <- Timoshenko correction
@@ -133,13 +145,13 @@ def build_transfer_matrix(E, L, D_out, D_in, density, start_x):
 
 ## Slide 11 [table]
 
-title: Phase 1 — Critical Parameter Calibration
+title: Critical Parameter Calibration
 
 table:
 | Parameter | Initial | Final | RMS Error Change |
 | --- | --- | --- | --- |
 | Beam theory | Euler-Bernoulli | Timoshenko | 450 -> 0.3 kgf |
-| Shear correction κ | 1.11~1.45 (Vulić recommended) | 1.0 (back-calibrated to LR) | 54 -> 0.3 kgf |
+| Shear correction κ | 1.11~1.45 (Vulić) | 1.0 (back-calibrated to LR) | 54 -> 0.3 kgf |
 | Elastic modulus E | 210,000 MPa | 206,843 kgf/cm² | hundreds -> < 1 kgf |
 | Unit system | mixed engineering | pure SI (N/mm/MPa) | reduced rounding |
 
@@ -149,7 +161,7 @@ notes:
 
 ## Slide 12 [table]
 
-title: Phase 1 — TMM Validation: Our Program vs LR Official (RMS < 1 kgf)
+title: TMM Validation: Our Program vs LR Official (RMS < 1 kgf)
 
 table:
 | Bearing | Our Program (kgf) | Bearing | Our Program (kgf) |
@@ -162,67 +174,25 @@ table:
 
 notes:
 - Test case: LR_Matric -03 standard rigid-support, 10 bearings
-- Total: program 82,135 kgf vs LR reference 82,132 kgf, **error -3.4 kgf** = 0.004%
-- Per-bearing maximum deviation < 1 kgf — fully matches LR official
+- Total: program 82,135 kgf vs LR reference 82,132 kgf, error -3.4 kgf = 0.004%
 
-## Slide 13 [section]
-
-title: The Real Role of ANSYS
-subtitle: Not Post-Hoc Validation — The Primary Tool for Debugging TMM
-
-## Slide 14 [content]
-
-title: APDL Auto-Generator — Unified Excel, One-Click for Both Models
-
-- **Unified input**: a single Excel (table-06 format)
-  - Engineers don't switch files, don't model manually
-  - Program auto-detects support types → selects model type
-- **Two outputs, one click**
-  - All L0 supports → 2D BEAM3 simplified model (for rigid/elastic reaction calc)
-  - Any L2 support → 3D contact model (BEAM188 + SHELL181 + CONTA174)
-- **Core engineering value**
-  - LR is a black box, intermediate states invisible — hard to debug
-  - ANSYS log exposes TMM intermediate states → reverse-locate bugs
-  - Powers both Phase 1 algorithm debugging AND Phase 3 beyond-LR contact analysis
-
-code:
-```python
-# gen_apdl_L2_3D_contact.py — Auto-detect + dual-mode generation
-support_kinds = read_excel_row7(xlsx)        # Row7: "L0" / "L2"
-
-if all(k == "L0" for k in support_kinds):
-    # Mode A: 2D BEAM3 (equivalent to Phase 1 algorithm validation)
-    w("ET,1,BEAM3")
-    for nid, x_pos in nodes:  w(f"N,{nid},{x_pos}")
-    for sup_nid, ky in supports:  w(f"D,{sup_nid},UY,0")
-else:
-    # Mode B: 3D contact (BEAM188 + SHELL181 + CONTA174)
-    w("ET,1,BEAM188")           # 3D Timoshenko beam
-    w("ET,3,SHELL181")           # Composite shell: white metal + steel
-    w("ET,4,TARGE170")           # Shadow ring
-    w("ET,5,CONTA174")           # Surface contact
-    # ...auto-generate CERIG rigid coupling, composite layup, contact params
-w("SOLVE")
-w(f"*GET,RB1,NODE,{nid_b1},RF,FY")
-```
-
-## Slide 15 [content]
+## Slide 13 [content]
 
 title: ANSYS Helped Me Debug TMM — TMM Was Wrong, ANSYS Agreed with LR
 
-- **Starting point**: TMM in Python, RMS = 450 kgf vs LR
+- Starting point: TMM in Python, RMS = 450 kgf vs LR
   - LR is a black box — no intermediate states, no way to locate the bug
-- **Breakthrough**: ANSYS BEAM3 model matched LR perfectly ✅
+- Breakthrough: ANSYS BEAM3 model matched LR perfectly ✅
   - → ANSYS and LR are both right; TMM is the one with a bug
-- **Used ANSYS detailed log to reverse-locate TMM's bugs**
+- Used ANSYS detailed log to reverse-locate TMM's bugs
   - Compared deflection, slope, bending moment node-by-node
   - Found TMM used Euler-Bernoulli, ANSYS used Timoshenko → after correction, RMS down to 54 kgf
-  - Continued comparing, found shear factor κ differs: Vulić paper [1.11, 1.45], ANSYS BEAM3 internal 1.0 → locked κ=1.0 → RMS = 0.33 kgf
-- **Final three-way agreement**: TMM = LR = ANSYS
+  - Continued comparing, locked κ=1.0 → RMS = 0.33 kgf
+- Final three-way agreement: TMM = LR = ANSYS
 
 → Without ANSYS detailed log, these two TMM bugs could not have been located
 
-## Slide 16 [content]
+## Slide 14 [content]
 
 title: Phase 2 — Elastic Support Solution (Influence Coefficient Matrix)
 
@@ -243,15 +213,23 @@ def solve_with_icm(params, rows):
 #   RMS = 0.64 kgf vs LR reference, relative error < 0.02%
 ```
 
-## Slide 17 [content]
+## Slide 15 [section]
 
-title: Phase 3 — Contact Model Architecture (Beyond LR)
+title: Phase 3
+subtitle: ANSYS Contact Analysis — Beyond LR
 
-- Model components (auto-generated from Excel)
+## Slide 16 [content]
+
+title: Contact Model Architecture (Auto-Generated from Excel)
+
+- Model components
   - BEAM188 shaft (65 nodes, 3D Timoshenko beam)
   - SHELL181 composite shell: white metal 3mm (E=75 GPa) + steel backing 25mm (E=210 GPa)
   - TARGE170 shadow ring (shaft surface) + CONTA174 surface contact
   - CERIG rigidly couples shadow rings to BEAM188 nodes (UX/UY/UZ)
+- Core engineering value
+  - Unified Excel input, one-click generation of two model types (2D BEAM3 / 3D contact)
+  - LR black box hides intermediate states → ANSYS log makes bugs visible
 
 code:
 ```apdl
@@ -262,32 +240,107 @@ ET,5,CONTA174             ! Surface-to-surface contact
 KEYOPT,5,2,0              ! Augmented Lagrangian
 KEYOPT,5,10,2             ! Update contact stiffness each iteration
 
-! Key trick: BEAM188 has no physical surface ->
-!           use CERIG to rigidly couple 13-node target ring to beam node
 *DO,i,1,n_axial
   CERIG,beam_nid(i),target_ring(i),UXYZ
 *ENDDO
 ```
 
-## Slide 18 [table]
+## Slide 17 [table]
 
-title: Phase 3 — Contact Analysis Results (Straight + Slope-Bored Bearings)
+title: Straight Bearing Contact Analysis Results
 
 table:
-| Case | Metric | Value | Assessment |
-| --- | --- | --- | --- |
-| Straight (Φ470, L=920mm) | L2 total reaction | 19,786 kgf | vs TMM 20,155, -1.8% ✅ |
-| Straight | Peak pressure | 3.1 MPa | allowable 7-10 MPa, margin 2× ✅ |
-| Straight | Contact arc | aft 180° -> fore 0° | physically correct ✅ |
-| Slope-bored (3 pivots, L=1410mm) | Total reaction | 48,893 kgf | vs MTM 48,236, +1.4% ✅ |
-| Slope-bored | Peak pressure | 3.75 MPa | within allowable ✅ |
-| Slope-bored | Contact length | 617 mm (44%) | LR software **cannot compute** |
+| Metric | Value | Assessment |
+| --- | --- | --- |
+| L2 total reaction | 19,786 kgf | vs TMM 20,155, -1.8% ✅ |
+| Peak pressure | 3.1 MPa | allowable 7-10 MPa, margin 2× ✅ |
+| Contact arc (aft) | 180° | physically correct ✅ |
+| Contact arc (fore) | 0° | aft→fore gradual narrowing ✅ |
+| Bearing size | Φ470 × L920mm | standard case table-07 |
 
 notes:
-- Slope-bored bearing with 3 adjacent rigid pivots: condition number 6.75e+12, point reactions oscillate ±100,000 kgf (mathematical artifact)
-- This is exactly why contact analysis is essential -> the project's core engineering value
+- Straight bearing = 2 pivots (shell concentric with shaft, h_center=0)
+- Contact arc narrows from aft 180° to fore 0°, consistent with beam bending
 
-## Slide 19 [table]
+## Slide 18 [content]
+
+title: Slope-Bored Bearing — Why Contact Analysis Is Essential
+
+- TMM's dilemma with slope-bored bearings (3 pivots)
+  - Expands 3 pivots into 3 independent point supports with forced displacements
+  - 3 non-collinear points → massive internal force oscillation: R1=-125,086 / R2=+204,729 / R3=-31,407 kgf
+  - These ±100,000 kgf reactions are mathematical artifacts (condition number 6.75e+12)
+  - But the resultant +48,236 kgf is correct
+- LR official software also cannot provide pressure distribution for slope-bored bearings
+- This is precisely why contact analysis is essential — the project's core engineering value
+
+## Slide 19 [content]
+
+title: Slope-Bored Bearing — Two-Step Method (New Progress)
+
+- Problem: how to correctly position shaft and shell initially in ANSYS?
+  - Tried 3 direct modelling approaches — all failed (shell offset, target offset combinations)
+  - Root cause: target ring bound to beam node at y=0; h values cannot take effect directly
+- Two-step method principle
+  - Step 1 (TMM elastic supports): replace L2 bearing with N=11 equally-spaced elastic supports (K=55621 kgf/mm), TMM solve → shaft's true deflection curve
+  - Step 2 (ANSYS contact): shell centre at y=-h(x) = bearing bore position; target ring at TMM deflection = shaft's actual position
+  - Difference = initial penetration → aft penetration large → aft reaction large → consistent with LR trend
+
+## Slide 20 [table]
+
+title: Slope-Bored Bearing Validation (Table-09, 3 Pivots)
+
+table:
+| Metric | Value | Assessment |
+| --- | --- | --- |
+| Bearing length | 1410 mm | shaft Φ670 |
+| L2 total reaction | 48,893 kgf | vs MTM 48,236, +1.4% ✅ |
+| Peak pressure | 3.75 MPa | allowable 7-10 MPa ✅ |
+| Contact length | 617 mm (44%) | LR software cannot compute |
+| Load distribution | max at aft, decreasing toward fore | consistent with LR ✅ |
+| Far-end bearings R7-R11 | < 0.1% deviation | global equilibrium ✅ |
+
+notes:
+- Step 1 TMM deflection vs LR deviation < 0.0013mm (1.3 microns)
+- Table-10 validation: raised fore end 5mm → load correctly shifts to fore (99% at fore)
+- Axial distribution: aft 28,769 kgf (180°) → decreasing → fore fully detached (0°)
+
+## Slide 21 [content]
+
+title: Two-Step Method — Known Limitations and Improvements
+
+- Known limitations
+  - Fore-end detachment: shell bending stiffness (25mm steel back) + fixed end arcs → seesaw effect
+  - LR independent spring model shows full-length contact (no bending coupling)
+  - Contact area undersized (~40%), peak pressure may be overestimated
+  - K=55621 hardcoded; different bearing designs need configurable K
+- Short-term improvement options
+  - Option A: elastic shell foundation (K_floor) — radial COMBIN14 springs, compression-only
+  - Option B: solid shaft segment (SOLID185) — shaft OD < shell ID (real clearance), beam-solid MPC transition
+  - Option B yields clearance distribution map, most physically realistic
+
+## Slide 22 [section]
+
+title: Future Research Directions
+subtitle: From Contact Model to Multi-Physics Coupling
+
+## Slide 23 [content]
+
+title: Future Research Directions
+
+- Short-term (resolve fore-end detachment)
+  - SOLID185 solid shaft segment + real clearance → full-length contact + clearance map
+  - K_floor sensitivity sweep → quantify hull local stiffness impact
+- Medium-term
+  - Full cylindrical shell (360°): visualize upper-half clearance
+  - Real clearance GAP=0.3~0.5mm: analyze gap effect on arc and pressure
+  - Slope-bore angle optimization: auto-iterate to find h-values for most uniform pressure
+- Long-term
+  - EHL oil film coupling: hydrodynamic pressure effects from lubricant film
+  - Thermo-structural coupling: temperature field effect on clearance and pressure
+  - Wear prediction: white metal wear life assessment based on contact pressure
+
+## Slide 24 [table]
 
 title: Project Achievement — Capability Comparison
 
@@ -297,20 +350,19 @@ table:
 | Rigid support reactions | ✅ | ✅ RMS < 1 kgf |
 | Elastic support reactions | ✅ | ✅ RMS = 0.64 kgf |
 | ANSYS cross-verification | ❌ | ✅ auto-generated APDL |
-| Bearing contact pressure | ❌ | ✅ p_max + arc + distribution |
-| Slope-bored bearing analysis | ❌ | ✅ 3-pivot verified |
-| Web GUI | yes | ✅ Streamlit |
-| Open & customizable code | ❌ | ✅ Python + APDL |
+| Straight bearing contact pressure | ❌ | ✅ p_max + arc + distribution |
+| Slope-bored bearing analysis | ❌ | ✅ two-step, 3-pivot verified |
+| Slope-bore h-value sensitivity | ❌ | ✅ table-10 verified |
+| Web GUI | ❌ | ✅ Streamlit |
+| Open and customizable code | ❌ | ✅ Python + APDL |
 
 notes:
-- Zero programming background → ~11,000 lines of Python (incl. tests) + auto-generated APDL
+- Zero programming background → ~11,000 lines of Python + auto-generated APDL
 - Deviation vs LR < 0.02%, vs ANSYS < 2%
-- AI toolchain: Microsoft Copilot (papers + algorithms) + VS Code (development + debugging)
+- AI toolchain: Microsoft Copilot + VS Code
 - ANSYS as the key debugging tool: LR is a black box, ANSYS log makes TMM bugs visible and locatable
-- Engineer's domain expertise + AI's coding capability + ANSYS detailed log = exceeding existing tools
 
-## Slide 20 [end]
+## Slide 25 [end]
 
 title: Thank You!
-subtitle: Engineering Curiosity + AI Exploration = Beyond Existing Tools
-Q&A
+subtitle: Engineering Curiosity + AI Exploration = Beyond Existing Tools\nQ&A

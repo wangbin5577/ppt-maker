@@ -35,6 +35,7 @@ class SlideData:
         self.table_rows = []
         self.notes = []
         self.code_blocks = []
+        self.image_placeholders = []
 
 
 class MarkdownParser:
@@ -334,6 +335,12 @@ class MarkdownParser:
                 current_section = None
                 continue
 
+            if stripped.lower().startswith('image:'):
+                caption = stripped[6:].strip()
+                slide.image_placeholders.append(caption)
+                current_section = None
+                continue
+
             if stripped.startswith('left_title:'):
                 slide.left_title = stripped[11:].strip()
                 current_section = None
@@ -520,10 +527,12 @@ class PPTGenerator:
                 self._add_content(sd, spacious=False)
 
     def _add_title_background(self, slide):
-        """为缺少标题背景的布局添加深蓝色标题栏和蓝色横线"""
+        """为缺少标题背景的布局添加深蓝色标题栏和蓝色横线，并把标题文字设为白色"""
         from pptx.dml.color import RGBColor
         from pptx.enum.shapes import MSO_SHAPE
-        
+        from pptx.oxml.ns import qn
+        from lxml import etree
+
         # 深蓝色标题背景 (accent2 = #003C71)
         bg_shape = slide.shapes.add_shape(
             MSO_SHAPE.RECTANGLE,
@@ -535,7 +544,7 @@ class PPTGenerator:
         bg_shape.line.fill.background()
         slide.shapes._spTree.remove(bg_shape._element)
         slide.shapes._spTree.insert(2, bg_shape._element)
-        
+
         # 蓝色横线 (accent1 = #3B8EDE)
         line_shape = slide.shapes.add_shape(
             MSO_SHAPE.RECTANGLE,
@@ -547,6 +556,54 @@ class PPTGenerator:
         line_shape.line.fill.background()
         slide.shapes._spTree.remove(line_shape._element)
         slide.shapes._spTree.insert(3, line_shape._element)
+
+        # 通过XML设置标题占位符默认白色字体
+        for ph in slide.placeholders:
+            if ph.placeholder_format.idx == 0:
+                txBody = ph._element.find(qn('p:txBody'))
+                if txBody is not None:
+                    lstStyle = txBody.find(qn('a:lstStyle'))
+                    if lstStyle is None:
+                        lstStyle = etree.SubElement(txBody, qn('a:lstStyle'))
+                    defPPr = lstStyle.find(qn('a:defPPr'))
+                    if defPPr is None:
+                        defPPr = etree.SubElement(lstStyle, qn('a:defPPr'))
+                    defRPr = defPPr.find(qn('a:defRPr'))
+                    if defRPr is None:
+                        defRPr = etree.SubElement(defPPr, qn('a:defRPr'))
+                    solidFill = defRPr.find(qn('a:solidFill'))
+                    if solidFill is None:
+                        solidFill = etree.SubElement(defRPr, qn('a:solidFill'))
+                    srgbClr = solidFill.find(qn('a:srgbClr'))
+                    if srgbClr is None:
+                        srgbClr = etree.SubElement(solidFill, qn('a:srgbClr'))
+                    srgbClr.set('val', 'FFFFFF')
+                break
+
+    def _set_title_white(self, slide):
+        """把标题占位符的文字颜色设为白色（在设置文字之后调用）"""
+        from pptx.dml.color import RGBColor
+        from pptx.oxml.ns import qn
+        from lxml import etree
+        WHITE = RGBColor(0xFF, 0xFF, 0xFF)
+        for ph in slide.placeholders:
+            if ph.placeholder_format.idx == 0:
+                tf = ph.text_frame
+                for para in tf.paragraphs:
+                    para.font.color.rgb = WHITE
+                    for run in para.runs:
+                        run.font.color.rgb = WHITE
+                    for r in para._p.findall(qn('a:r')):
+                        rPr = r.find(qn('a:rPr'))
+                        if rPr is None:
+                            rPr = etree.SubElement(r, qn('a:rPr'))
+                            r.insert(0, rPr)
+                        for old in rPr.findall(qn('a:solidFill')):
+                            rPr.remove(old)
+                        solidFill = etree.SubElement(rPr, qn('a:solidFill'))
+                        srgbClr = etree.SubElement(solidFill, qn('a:srgbClr'))
+                        srgbClr.set('val', 'FFFFFF')
+                break
 
     def _add_cover(self, sd):
         layout = self.prs.slide_layouts[self.layouts["cover"]]
@@ -577,8 +634,17 @@ class PPTGenerator:
             return Pt(14), Pt(13), Pt(3), Pt(1)
 
     def _add_content(self, sd, spacious=False):
-        if sd.code_blocks:
-            spacious = True
+        has_images = bool(sd.image_placeholders)
+        has_code = bool(sd.code_blocks)
+
+        if has_images and not has_code:
+            self._add_content_with_images(sd)
+            return
+
+        if has_code:
+            self._add_content_with_code(sd)
+            return
+
         layout_key = "content_spacious" if spacious else "content"
         layout = self.prs.slide_layouts[self.layouts[layout_key]]
         slide = self.prs.slides.add_slide(layout)
@@ -586,14 +652,11 @@ class PPTGenerator:
         if 0 in [ph.placeholder_format.idx for ph in slide.placeholders]:
             slide.placeholders[0].text = sd.title
 
-        size_l0, size_l1, space_after, space_before = self._calc_font_size(
-            sd.bullets, has_code=bool(sd.code_blocks)
-        )
+        size_l0, size_l1, space_after, space_before = self._calc_font_size(sd.bullets)
 
         if 1 in [ph.placeholder_format.idx for ph in slide.placeholders]:
             tf = slide.placeholders[1].text_frame
             tf.clear()
-
             first_para = True
             for text, level in sd.bullets:
                 if first_para:
@@ -607,22 +670,220 @@ class PPTGenerator:
                 p.space_after = space_after
                 p.space_before = space_before
 
-            # 代码块追加到同一个text_frame中
-            if sd.code_blocks:
-                from pptx.dml.color import RGBColor
-                for code in sd.code_blocks:
-                    p = tf.add_paragraph()
-                    p.space_after = Pt(2)
-                    for code_line in code.split('\n'):
-                        p = tf.add_paragraph()
-                        run = p.add_run()
-                        run.text = code_line
-                        run.font.name = 'Consolas'
-                        run.font.size = Pt(11)
-                        run.font.color.rgb = RGBColor(0x33, 0x33, 0x33)
-                        p.space_after = Pt(0)
-                        p.space_before = Pt(0)
-                        p.level = 0
+    def _add_content_with_code(self, sd):
+        """有代码块时使用左文右代码的分栏布局"""
+        from pptx.dml.color import RGBColor
+        layout_key = "title_only" if "title_only" in self.layouts else "content"
+        layout = self.prs.slide_layouts[self.layouts[layout_key]]
+        slide = self.prs.slides.add_slide(layout)
+
+        ph_indices = [ph.placeholder_format.idx for ph in slide.placeholders]
+        if 0 in ph_indices:
+            slide.placeholders[0].text = sd.title
+
+        # 添加标题背景
+        self._add_title_background(slide)
+        self._set_title_white(slide)
+
+        # 删除所有内容占位符
+        for ph in list(slide.placeholders):
+            if ph.placeholder_format.idx != 0:
+                ph._element.getparent().remove(ph._element)
+
+        content_top = Inches(1.65)
+        content_bottom = Inches(6.6)
+        content_height = content_bottom - content_top
+        left_margin = Inches(0.5)
+        gap = Inches(0.3)
+        total_width = Inches(11.2)
+        n_bullets = len(sd.bullets)
+        n_codes = len(sd.code_blocks)
+
+        if n_bullets == 0:
+            code_width = total_width
+            code_left = left_margin
+        else:
+            text_width = total_width * 0.40
+            code_width = total_width * 0.55
+            code_left = left_margin + text_width + gap
+
+            size_l0, size_l1, space_after, space_before = self._calc_font_size(sd.bullets)
+            txBox = slide.shapes.add_textbox(left_margin, content_top, text_width, content_height)
+            tf = txBox.text_frame
+            tf.word_wrap = True
+            tf.margin_top = Pt(4)
+            tf.margin_left = Pt(4)
+            for i, (text, level) in enumerate(sd.bullets):
+                p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
+                p.text = ("  " * level + "• " if level > 0 else "• ") + text
+                p.font.size = size_l0 if level == 0 else size_l1
+                p.font.color.rgb = RGBColor(0x1A, 0x6B, 0xB5)
+                p.space_after = space_after
+                p.space_before = space_before
+
+        if n_codes > 0:
+            code_gap = Inches(0.15)
+            single_height = (content_height - code_gap * (n_codes - 1)) / n_codes
+            top = content_top
+            for code in sd.code_blocks:
+                lines = code.split('\n')
+                n_lines = len(lines)
+                height = min(single_height, Inches(n_lines * 0.22 + 0.3))
+                height = max(height, Inches(0.8))
+
+                txBox = slide.shapes.add_textbox(code_left, top, code_width, height)
+                tf = txBox.text_frame
+                tf.word_wrap = True
+                tf.margin_top = Pt(6)
+                tf.margin_bottom = Pt(6)
+                tf.margin_left = Pt(8)
+                txBox.fill.solid()
+                txBox.fill.fore_color.rgb = RGBColor(0xF5, 0xF5, 0xF5)
+                txBox.line.color.rgb = RGBColor(0xBB, 0xBB, 0xBB)
+                txBox.line.width = Pt(0.75)
+
+                code_size = Pt(11) if n_lines <= 8 else Pt(10) if n_lines <= 14 else Pt(9)
+                for i, code_line in enumerate(lines):
+                    p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
+                    p.text = code_line
+                    p.font.name = 'Consolas'
+                    p.font.size = code_size
+                    p.font.color.rgb = RGBColor(0x2D, 0x2D, 0x2D)
+                    p.space_after = Pt(1)
+                    p.space_before = Pt(0)
+                top += height + code_gap
+
+    def _add_content_with_images(self, sd):
+        """有图片时使用左文右图的分栏布局"""
+        layout_key = "title_only" if "title_only" in self.layouts else "content"
+        layout = self.prs.slide_layouts[self.layouts[layout_key]]
+        slide = self.prs.slides.add_slide(layout)
+
+        ph_indices = [ph.placeholder_format.idx for ph in slide.placeholders]
+        if 0 in ph_indices:
+            slide.placeholders[0].text = sd.title
+
+        # 添加标题背景
+        self._add_title_background(slide)
+        self._set_title_white(slide)
+
+        # 删除所有内容占位符
+        for ph in list(slide.placeholders):
+            if ph.placeholder_format.idx != 0:
+                ph._element.getparent().remove(ph._element)
+
+        n_images = len(sd.image_placeholders)
+        n_bullets = len(sd.bullets)
+
+        content_top = Inches(1.6)
+        content_bottom = Inches(6.6)
+        content_height = content_bottom - content_top
+        left_margin = Inches(0.5)
+        gap = Inches(0.3)
+        total_width = Inches(11.2)
+
+        if n_bullets == 0:
+            text_width = Inches(0)
+            img_width = total_width
+            img_left = left_margin
+        else:
+            text_width = total_width * 0.42
+            img_width = total_width * 0.53
+            img_left = left_margin + text_width + gap
+
+        if n_bullets > 0:
+            from pptx.dml.color import RGBColor
+            txBox = slide.shapes.add_textbox(left_margin, content_top, text_width, content_height)
+            tf = txBox.text_frame
+            tf.word_wrap = True
+            tf.margin_top = Pt(4)
+            tf.margin_left = Pt(4)
+            size_l0, size_l1, space_after, space_before = self._calc_font_size(sd.bullets)
+            for i, (text, level) in enumerate(sd.bullets):
+                p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
+                p.text = ("  " * level + "• " if level > 0 else "• ") + text
+                p.font.size = size_l0 if level == 0 else size_l1
+                p.font.color.rgb = RGBColor(0x1A, 0x6B, 0xB5)
+                p.space_after = space_after
+                p.space_before = space_before
+
+        if n_images > 0:
+            img_gap = Inches(0.15)
+            single_height = (content_height - img_gap * (n_images - 1)) / n_images
+            for i, caption in enumerate(sd.image_placeholders):
+                img_top = content_top + i * (single_height + img_gap)
+                self._draw_image_placeholder(slide, img_left, img_top, img_width, single_height, caption)
+
+    def _add_image_placeholders(self, slide, captions, n_bullets=0, has_code=False):
+        """添加图片占位框"""
+        from pptx.dml.color import RGBColor
+        from pptx.oxml.ns import qn
+        from lxml import etree
+        from pptx.enum.shapes import MSO_SHAPE
+
+        base_top = 1.7 + n_bullets * 0.35
+        if has_code:
+            base_top += 2.5
+        base_top = max(base_top, 2.5)
+        base_top = min(base_top, 4.8)
+
+        page_bottom = Inches(6.6)
+        n = len(captions)
+
+        if n == 1:
+            top = Inches(base_top)
+            available = page_bottom - top
+            height = min(Inches(2.5), available)
+            if height < Inches(0.6):
+                return
+            self._draw_image_placeholder(slide, Inches(1.5), top, Inches(9.0), height, captions[0])
+        else:
+            top = Inches(base_top)
+            available = page_bottom - top
+            height = min(Inches(2.2), available)
+            if height < Inches(0.6):
+                return
+            total_width = Inches(10.4)
+            gap = Inches(0.2)
+            w = (total_width - gap * (n - 1)) / n
+            for i, caption in enumerate(captions):
+                left = Inches(0.8) + i * (w + gap)
+                self._draw_image_placeholder(slide, left, top, w, height, caption)
+
+    def _draw_image_placeholder(self, slide, left, top, width, height, caption):
+        """绘制单个图片占位框"""
+        from pptx.dml.color import RGBColor
+        from pptx.enum.shapes import MSO_SHAPE
+        from pptx.oxml.ns import qn
+        from lxml import etree
+        from pptx.enum.text import PP_ALIGN
+
+        box = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, left, top, width, height)
+        box.fill.solid()
+        box.fill.fore_color.rgb = RGBColor(0xE8, 0xF4, 0xFF)
+        box.line.color.rgb = RGBColor(0x3B, 0x8E, 0xDE)
+        box.line.width = Pt(1.0)
+        ln = box._element.find('.//' + qn('a:ln'))
+        if ln is not None:
+            prstDash = etree.SubElement(ln, qn('a:prstDash'))
+            prstDash.set('val', 'dash')
+
+        tf = box.text_frame
+        tf.word_wrap = True
+        tf.margin_top = Pt(8)
+        tf.margin_left = Pt(8)
+
+        p1 = tf.paragraphs[0]
+        p1.text = "🖼"
+        p1.font.size = Pt(20)
+        p1.alignment = PP_ALIGN.CENTER
+
+        p2 = tf.add_paragraph()
+        p2.text = caption if caption else "[ 图片 ]"
+        p2.font.size = Pt(11)
+        p2.font.color.rgb = RGBColor(0x1a, 0x6b, 0xb5)
+        p2.font.italic = True
+        p2.alignment = PP_ALIGN.CENTER
 
     def _add_code_blocks(self, slide, code_blocks, n_bullets=0):
         """在幻灯片上添加代码块文本框"""
@@ -672,6 +933,7 @@ class PPTGenerator:
 
         if 0 in ph_indices:
             slide.placeholders[0].text = sd.title
+            self._set_title_white(slide)
         if 1 in ph_indices:
             slide.placeholders[1].text = sd.left_title
         if 3 in ph_indices:
@@ -701,6 +963,18 @@ class PPTGenerator:
 
         if 0 in [ph.placeholder_format.idx for ph in slide.placeholders]:
             slide.placeholders[0].text = sd.title
+
+        # 如果布局缺少深蓝色标题背景，手动添加
+        layout_name = layout.name.lower()
+        if "spacious" in layout_name or "spacous" in layout_name:
+            self._add_title_background(slide)
+            self._set_title_white(slide)
+
+        # 删除内容占位符（idx=1），避免显示 "Click to add text"
+        for ph in list(slide.placeholders):
+            if ph.placeholder_format.idx == 1:
+                ph._element.getparent().remove(ph._element)
+                break
 
         if sd.table_headers and sd.table_rows:
             n_cols = len(sd.table_headers)
@@ -757,6 +1031,11 @@ class PPTGenerator:
 # Streamlit Web UI
 # ============================================================
 
+DEFAULT_TEMPLATE = "LR模板.pptx"
+FORMAT_SPEC_FILE = "PPT提示词格式规范.md"
+OUTPUT_DIR = "output"
+
+
 def main():
     st.set_page_config(
         page_title="PPT Maker",
@@ -764,188 +1043,266 @@ def main():
         layout="wide"
     )
 
-    st.title("📊 PPT Maker")
-    st.markdown("上传提示词和PPT模板，一键生成演示文稿")
+    # ── 全局样式 ──────────────────────────────────────────────
+    st.markdown("""
+    <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap');
 
-    st.divider()
+    html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 
-    # 两列布局
-    col1, col2 = st.columns(2)
+    .main-header {
+        background: linear-gradient(135deg, #003C71 0%, #1a6bb5 100%);
+        padding: 2rem 2.5rem;
+        border-radius: 12px;
+        margin-bottom: 1.5rem;
+        color: white;
+    }
+    .main-header h1 { color: white; margin: 0; font-size: 2rem; font-weight: 600; }
+    .main-header p  { color: rgba(255,255,255,0.85); margin: 0.4rem 0 0; font-size: 1rem; }
 
+    .card {
+        background: #ffffff;
+        border: 1px solid #e8ecf0;
+        border-radius: 10px;
+        padding: 1.5rem;
+        margin-bottom: 1rem;
+        box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+    }
+    .card h3 { margin-top: 0; color: #003C71; font-size: 1.05rem; font-weight: 600; }
+
+    .step-badge {
+        display: inline-block;
+        background: #003C71;
+        color: white;
+        border-radius: 50%;
+        width: 26px; height: 26px;
+        text-align: center; line-height: 26px;
+        font-size: 0.85rem; font-weight: 600;
+        margin-right: 8px;
+    }
+
+    .stButton > button {
+        background: linear-gradient(135deg, #003C71, #1a6bb5);
+        color: white;
+        border: none;
+        border-radius: 8px;
+        font-weight: 600;
+        font-size: 1rem;
+        padding: 0.6rem 1.5rem;
+        transition: opacity 0.2s;
+    }
+    .stButton > button:hover { opacity: 0.88; }
+
+    .stDownloadButton > button {
+        background: linear-gradient(135deg, #1a7a4a, #2ea86a);
+        color: white;
+        border: none;
+        border-radius: 8px;
+        font-weight: 600;
+    }
+
+    .success-box {
+        background: #f0faf4;
+        border: 1px solid #2ea86a;
+        border-radius: 8px;
+        padding: 1rem 1.2rem;
+        color: #1a5c35;
+    }
+    .info-box {
+        background: #f0f6ff;
+        border: 1px solid #3B8EDE;
+        border-radius: 8px;
+        padding: 0.8rem 1.2rem;
+        color: #003C71;
+        font-size: 0.9rem;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+    # ── 页头 ──────────────────────────────────────────────────
+    st.markdown("""
+    <div class="main-header">
+        <h1>📊 PPT Maker</h1>
+        <p>基于公司模板，从 Markdown 提示词一键生成 PowerPoint 演示文稿</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ── 两列布局：模板 + 提示词 ───────────────────────────────
+    col1, col2 = st.columns([1, 1], gap="medium")
+
+    # ── Step 1: 模板 ──────────────────────────────────────────
     with col1:
-        st.subheader("1️⃣ 上传PPT模板")
+        st.markdown('<div class="card"><h3><span class="step-badge">1</span>PPT 模板</h3>', unsafe_allow_html=True)
         template_file = st.file_uploader(
-            "选择 .pptx 模板文件",
+            "上传自定义模板（可选）",
             type=["pptx"],
-            help="上传公司PPT模板，生成的PPT将使用该模板的样式"
+            help="不上传则使用默认 LR 模板",
+            label_visibility="collapsed"
         )
         if template_file:
-            st.success(f"✅ 模板已上传: {template_file.name}")
+            st.markdown(f'<div class="info-box">✅ 已上传：{template_file.name}</div>', unsafe_allow_html=True)
+        else:
+            default_exists = os.path.exists(DEFAULT_TEMPLATE)
+            if default_exists:
+                st.markdown('<div class="info-box">📋 使用默认 LR 模板</div>', unsafe_allow_html=True)
+            else:
+                st.warning("⚠️ 未找到默认模板，请上传模板文件")
+        st.markdown('</div>', unsafe_allow_html=True)
 
+    # ── Step 2: 提示词 ────────────────────────────────────────
     with col2:
-        st.subheader("2️⃣ 提供提示词")
-        input_method = st.radio(
-            "选择输入方式",
-            ["上传.md文件", "直接粘贴"],
-            horizontal=True
-        )
-
+        st.markdown('<div class="card"><h3><span class="step-badge">2</span>提示词内容</h3>', unsafe_allow_html=True)
+        input_method = st.radio("输入方式", ["上传 .md 文件", "直接粘贴"], horizontal=True, label_visibility="collapsed")
         md_content = None
 
-        if input_method == "上传.md文件":
-            md_file = st.file_uploader(
-                "选择提示词 .md 文件",
-                type=["md", "txt"],
-                help="按照格式规范编写的Markdown提示词文件"
-            )
+        if input_method == "上传 .md 文件":
+            md_file = st.file_uploader("选择提示词文件", type=["md", "txt"], label_visibility="collapsed")
             if md_file:
                 md_content = md_file.read().decode("utf-8")
-                st.success(f"✅ 提示词已上传: {md_file.name}")
+                st.markdown(f'<div class="info-box">✅ 已上传：{md_file.name}</div>', unsafe_allow_html=True)
         else:
             md_content = st.text_area(
-                "粘贴提示词内容",
-                height=400,
-                placeholder="## Slide 1 [cover]\n\ntitle: 我的演示\nsubtitle: 副标题\n\n## Slide 2 [content]\n\ntitle: 第一页\n\n- 要点1\n- 要点2"
+                "粘贴提示词",
+                height=180,
+                placeholder="## Slide 1 [cover]\n\ntitle: 演示标题\nsubtitle: 副标题\n\n## Slide 2 [content]\n\ntitle: 第一页\n\n- 要点1\n- 要点2",
+                label_visibility="collapsed"
             )
-            if md_content:
-                st.success("✅ 提示词已输入")
+        st.markdown('</div>', unsafe_allow_html=True)
 
-    st.divider()
+    # ── 生成按钮 ──────────────────────────────────────────────
+    st.markdown("<br>", unsafe_allow_html=True)
+    generate_col, _ = st.columns([2, 3])
+    with generate_col:
+        generate_clicked = st.button("🚀 生成 PPT", type="primary", use_container_width=True)
 
-    # 预览解析结果
-    if md_content:
-        with st.expander("📋 预览解析结果", expanded=False):
-            parser = MarkdownParser(md_content)
-            slides = parser.parse()
-            if slides:
-                for sd in slides:
-                    st.markdown(f"**Slide {sd.index}** `[{sd.layout}]` — {sd.title}")
-            else:
-                st.warning("⚠️ 未解析到任何幻灯片，请检查格式是否正确")
-
-    # 生成按钮
-    st.subheader("3️⃣ 生成PPT")
-
-    if st.button("🚀 生成PPT", type="primary", use_container_width=True):
-        if not template_file:
-            st.error("❌ 请先上传PPT模板")
+    if generate_clicked:
+        # 检查条件
+        has_template = template_file is not None or os.path.exists(DEFAULT_TEMPLATE)
+        if not has_template:
+            st.error("❌ 请上传 PPT 模板，或将 LR模板.pptx 放在程序目录下")
             return
         if not md_content:
-            st.error("❌ 请先提供提示词内容")
+            st.error("❌ 请提供提示词内容")
             return
 
-        with st.spinner("正在生成PPT..."):
+        with st.spinner("正在生成 PPT，请稍候..."):
             try:
                 # 解析提示词
                 parser = MarkdownParser(md_content)
                 slides_data = parser.parse()
-
                 if not slides_data:
                     st.error("❌ 提示词解析失败，未找到任何 `## Slide N` 格式的内容")
                     return
 
-                # 保存模板到临时文件
-                template_file.seek(0)  # 确保从头读取
-                with tempfile.NamedTemporaryFile(suffix=".pptx", delete=False) as tmp_template:
-                    tmp_template.write(template_file.read())
-                    tmp_template_path = tmp_template.name
+                # 准备模板
+                if template_file:
+                    template_file.seek(0)
+                    with tempfile.NamedTemporaryFile(suffix=".pptx", delete=False) as tmp:
+                        tmp.write(template_file.read())
+                        template_path = tmp.name
+                    cleanup_template = True
+                else:
+                    template_path = DEFAULT_TEMPLATE
+                    cleanup_template = False
 
-                # 生成PPT
-                gen = PPTGenerator(tmp_template_path)
+                # 生成 PPT
+                gen = PPTGenerator(template_path)
                 gen.generate(slides_data)
 
-                # 保存输出到临时文件
-                with tempfile.NamedTemporaryFile(suffix=".pptx", delete=False) as tmp_output:
-                    tmp_output_path = tmp_output.name
+                # 保存到 output 目录，文件名带时间戳
+                from datetime import datetime
+                os.makedirs(OUTPUT_DIR, exist_ok=True)
+                ts = datetime.now().strftime("%m%d_%H%M")
+                # 从提示词第一页标题生成文件名
+                base_name = slides_data[0].title[:20].strip() if slides_data else "presentation"
+                # 去掉非法字符
+                safe_name = re.sub(r'[\\/:*?"<>|]', '', base_name).strip() or "presentation"
+                output_filename = f"{safe_name}_{ts}.pptx"
+                output_path = os.path.join(OUTPUT_DIR, output_filename)
+                gen.save(output_path)
 
-                gen.save(tmp_output_path)
-
-                # 读取生成的文件
-                with open(tmp_output_path, "rb") as f:
+                # 读取文件供下载
+                with open(output_path, "rb") as f:
                     pptx_bytes = f.read()
 
-                # 清理临时文件
-                os.unlink(tmp_template_path)
-                os.unlink(tmp_output_path)
+                if cleanup_template:
+                    os.unlink(template_path)
 
-                # 显示成功信息
-                st.success(f"✅ PPT生成成功！共 {len(slides_data)} 页")
+                # 成功提示
+                st.markdown(f"""
+                <div class="success-box">
+                    ✅ <strong>生成成功！</strong>共 {len(slides_data)} 页<br>
+                    📁 已保存至 <code>output/{output_filename}</code>
+                </div>
+                """, unsafe_allow_html=True)
+                st.markdown("<br>", unsafe_allow_html=True)
 
                 # 下载按钮
                 st.download_button(
-                    label="📥 下载PPT",
+                    label=f"📥 下载 {output_filename}",
                     data=pptx_bytes,
-                    file_name="generated_presentation.pptx",
+                    file_name=output_filename,
                     mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
                     use_container_width=True
                 )
 
             except Exception as e:
-                st.error(f"❌ 生成失败: {str(e)}")
+                st.error(f"❌ 生成失败：{str(e)}")
                 st.exception(e)
 
-    # 底部帮助信息
-    st.divider()
-    with st.expander("❓ 格式帮助"):
+    # ── 底部格式帮助 ──────────────────────────────────────────
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # ── Step 3: 参考资源 ──────────────────────────────────────
+    st.markdown('<div class="card"><h3><span class="step-badge">3</span>参考资源</h3>', unsafe_allow_html=True)
+    res_col1, res_col2 = st.columns([1, 2], gap="medium")
+    with res_col1:
+        if os.path.exists(FORMAT_SPEC_FILE):
+            with open(FORMAT_SPEC_FILE, "rb") as f:
+                st.download_button(
+                    label="📄 下载提示词格式规范",
+                    data=f.read(),
+                    file_name="PPT提示词格式规范.md",
+                    mime="text/markdown",
+                    use_container_width=True
+                )
+        else:
+            st.info("格式规范文件未找到")
+    with res_col2:
+        if md_content:
+            parser = MarkdownParser(md_content)
+            slides = parser.parse()
+            if slides:
+                for sd in slides:
+                    icon = {"cover": "🎯", "content": "📝", "table": "📊",
+                            "comparison": "⚖️", "section": "📌", "end": "🏁"}.get(sd.layout, "📄")
+                    st.markdown(f"{icon} **{sd.index}** {sd.title[:40] or '(无标题)'}")
+            else:
+                st.warning("未解析到幻灯片，请检查格式")
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    with st.expander("❓ 提示词格式速查"):
         st.markdown("""
-### 支持的布局类型
+| 布局标记 | 用途 | 必填字段 |
+|----------|------|---------|
+| `[cover]` | 封面页 | `title:`, `subtitle:` |
+| `[content]` | 正文页 | `title:`, `- 要点` |
+| `[comparison]` | 双栏对比 | `title:`, `left_title:`, `left:`, `right_title:`, `right:` |
+| `[table]` | 表格页 | `title:`, Markdown 表格 |
+| `[section]` | 章节页 | `title:`, `subtitle:` |
+| `[end]` | 结束页 | `title:` |
 
-| 标记 | 用途 |
-|------|------|
-| `[cover]` | 封面页 |
-| `[content]` | 标准正文页 |
-| `[content_spacious]` | 大内容区正文页 |
-| `[comparison]` | 双栏对比页 |
-| `[table]` | 表格页 |
-| `[section]` | 章节分隔页 |
-| `[end]` | 结束页 |
+**代码块**：在正文页中用 ` ``` ` 包裹代码，自动渲染为等宽字体文本框。
 
-### 快速示例
+**图片占位**：用 `image: 说明文字` 预留图片位置，后期手工替换。
 
-```markdown
-## Slide 1 [cover]
+**自动字体缩放**：内容越多字号越小，保证不溢出页面。
 
-title: 演示标题
-subtitle: 副标题
-
-## Slide 2 [content]
-
-title: 页面标题
-
-- 第一个要点
-  - 子要点
-- 第二个要点
-
-## Slide 3 [comparison]
-
-title: 对比页标题
-
-left_title: 左栏
-left:
-- 左边内容1
-- 左边内容2
-
-right_title: 右栏
-right:
-- 右边内容1
-- 右边内容2
-
-## Slide 4 [table]
-
-title: 表格页标题
-
-table:
-| 列A | 列B | 列C |
-| --- | --- | --- |
-| 数据1 | 数据2 | 数据3 |
-
-## Slide 5 [end]
-
-title: 谢谢！
-subtitle: Q&A
-```
+**多格式支持**：`## Slide 1 [cover]` / `## Slide 1 — Cover` / `## 第1页 封面` 均可识别。
         """)
 
 
 if __name__ == "__main__":
     main()
+
